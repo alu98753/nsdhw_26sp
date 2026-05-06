@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <immintrin.h>
+#include <memory>
 
 
 namespace py = pybind11;
@@ -215,7 +216,7 @@ Matrix multiply_mkl(const Matrix &A, const Matrix &B) {
 PYBIND11_MODULE(_matrix, m) {
     m.doc() = "Matrix multiplication: naive, tiled, BLAS DGEMM";
 
-    py::class_<Matrix>(m, "Matrix", py::dynamic_attr())
+    py::class_<Matrix, std::shared_ptr<Matrix>>(m, "Matrix")
         .def(py::init<size_t, size_t>(), py::arg("nrow"), py::arg("ncol"))
         .def_property_readonly("nrow", &Matrix::nrow)
         .def_property_readonly("ncol", &Matrix::ncol)
