@@ -1,4 +1,5 @@
 #include <limits>
+#include <memory>
 #include <new>
 #include <pybind11/pybind11.h>
 #include <cblas.h>
@@ -7,7 +8,6 @@
 #include <cmath>
 #include <cstring>
 #include <immintrin.h>
-#include <memory>
 
 
 namespace py = pybind11;
@@ -62,6 +62,8 @@ public:
 
     Matrix(const Matrix &) = default;
     Matrix &operator=(const Matrix &) = default;
+    Matrix(Matrix &&) noexcept = default;
+    Matrix &operator=(Matrix &&) noexcept = default;
 
     size_t nrow() const { return m_nrow; }
     size_t ncol() const { return m_ncol; }
@@ -81,20 +83,19 @@ public:
 
 private:
     size_t m_nrow, m_ncol;
-    //std::vector<double> m_data;
     using buffer_t = std::vector<double, CustomAllocator<double>>;
     buffer_t m_data;
 };
 
 
-Matrix multiply_naive(const Matrix &A, const Matrix &B) {
+Matrix* multiply_naive(const Matrix &A, const Matrix &B) {
     if (A.ncol() != B.nrow())
         throw std::invalid_argument("Matrix dimensions do not match");
 
     const size_t M = A.nrow(), K = A.ncol(), N = B.ncol();
-    Matrix C(M, N);
+    Matrix* C = new Matrix(M, N);
     const double *a = A.data(), *b = B.data();
-    double       *c = C.data();
+    double       *c = C->data();
 
     for (size_t i = 0; i < M; ++i)
         for (size_t k = 0; k < K; ++k) {
@@ -109,25 +110,22 @@ Matrix multiply_naive(const Matrix &A, const Matrix &B) {
 
 
 static constexpr size_t KC = 128;
-static constexpr size_t NC = 500;  
+static constexpr size_t NC = 500;
 
-Matrix multiply_tile(const Matrix &A, const Matrix &B, size_t tsize) {
+Matrix* multiply_tile(const Matrix &A, const Matrix &B, size_t tsize) {
     if (A.ncol() != B.nrow())
         throw std::invalid_argument("Matrix dimensions do not match");
     if (tsize == 0)
         throw std::invalid_argument("Tile size must be > 0");
 
     const size_t M = A.nrow(), K = A.ncol(), N = B.ncol();
-    Matrix C(M, N);
+    Matrix* C = new Matrix(M, N);
     const double *a = A.data(), *b = B.data();
-    double       *c = C.data();
+    double       *c = C->data();
 
-  
     const size_t MC = std::max(tsize, size_t(64));
 
-  
     std::vector<double> bpack(KC * NC);
-    
     std::vector<double> apack(MC * KC);
 
     for (size_t k0 = 0; k0 < K; k0 += KC) {
@@ -138,7 +136,6 @@ Matrix multiply_tile(const Matrix &A, const Matrix &B, size_t tsize) {
             const size_t jEnd = std::min(j0 + NC, N);
             const size_t jLen = jEnd - j0;
 
-            
             for (size_t ki = 0; ki < kLen; ++ki)
                 std::memcpy(bpack.data() + ki * jLen,
                             b + (k0 + ki) * N + j0,
@@ -148,20 +145,17 @@ Matrix multiply_tile(const Matrix &A, const Matrix &B, size_t tsize) {
                 const size_t iEnd = std::min(i0 + MC, M);
                 const size_t iLen = iEnd - i0;
 
-             
                 for (size_t ii = 0; ii < iLen; ++ii)
                     std::memcpy(apack.data() + ii * kLen,
                                 a + (i0 + ii) * K + k0,
                                 kLen * sizeof(double));
 
-               
                 for (size_t ii = 0; ii < iLen; ++ii) {
                     const double *ai = apack.data() + ii * kLen;
                     double       *ci = c + (i0 + ii) * N + j0;
                     const double *bp = bpack.data();
 
                     size_t ki = 0;
-                    
                     for (; ki + 4 <= kLen; ki += 4) {
                         const __m256d va0 = _mm256_set1_pd(ai[ki+0]);
                         const __m256d va1 = _mm256_set1_pd(ai[ki+1]);
@@ -198,25 +192,25 @@ Matrix multiply_tile(const Matrix &A, const Matrix &B, size_t tsize) {
 }
 
 
-Matrix multiply_mkl(const Matrix &A, const Matrix &B) {
+Matrix* multiply_mkl(const Matrix &A, const Matrix &B) {
     if (A.ncol() != B.nrow())
         throw std::invalid_argument("Matrix dimensions do not match");
 
     const int M = (int)A.nrow(), K = (int)A.ncol(), N = (int)B.ncol();
-    Matrix C(M, N);
+    Matrix* C = new Matrix(M, N);
 
     cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                 M, N, K,
                 1.0, A.data(), K,
                      B.data(), N,
-                0.0, C.data(), N);
+                0.0, C->data(), N);
     return C;
 }
 
 PYBIND11_MODULE(_matrix, m) {
     m.doc() = "Matrix multiplication: naive, tiled, BLAS DGEMM";
 
-    py::class_<Matrix, std::shared_ptr<Matrix>>(m, "Matrix")
+    py::class_<Matrix>(m, "Matrix")
         .def(py::init<size_t, size_t>(), py::arg("nrow"), py::arg("ncol"))
         .def_property_readonly("nrow", &Matrix::nrow)
         .def_property_readonly("ncol", &Matrix::ncol)
@@ -232,23 +226,13 @@ PYBIND11_MODULE(_matrix, m) {
         ;
 
     m.def("multiply_naive", &multiply_naive, py::arg("A"), py::arg("B"),
-          py::return_value_policy::move);
+          py::return_value_policy::take_ownership);
     m.def("multiply_tile",  &multiply_tile,  py::arg("A"), py::arg("B"), py::arg("tsize"),
-          py::return_value_policy::move);
+          py::return_value_policy::take_ownership);
     m.def("multiply_mkl",   &multiply_mkl,   py::arg("A"), py::arg("B"),
-          py::return_value_policy::move);
+          py::return_value_policy::take_ownership);
 
     m.def("bytes",       []{ return g_tracker.current;       });
     m.def("allocated",   []{ return g_tracker.total_alloc;   });
     m.def("deallocated", []{ return g_tracker.total_dealloc; });
-
-//     m.def("multiply_naive", &multiply_naive, py::arg("A"), py::arg("B"));
-//     m.def("multiply_tile",  &multiply_tile,  py::arg("A"), py::arg("B"), py::arg("tsize"));
-//     m.def("multiply_mkl",   &multiply_mkl,   py::arg("A"), py::arg("B"));
-
-//     m.def("bytes",       []{ return g_tracker.current;       });
-// m.def("allocated",   []{ return g_tracker.total_alloc;   });
-// m.def("deallocated", []{ return g_tracker.total_dealloc; });
 }
-
-
