@@ -3,35 +3,82 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/operators.h>
 #include <mkl_cblas.h>
+#include <atomic>
+#include <vector>
 namespace py = pybind11;
+
+
+std::atomic<size_t> total_allocated(0);
+std::atomic<size_t> total_deallocated(0);
+
+size_t bytes(){
+    return total_allocated - total_deallocated;
+}
+size_t allocated(){
+    return total_allocated;
+}
+size_t deallocated(){
+    return total_deallocated;
+}
+
+
+template <class T>
+struct CustomAllocator{
+    using value_type = T;
+    CustomAllocator() = default;
+
+    template <class U>
+    constexpr CustomAllocator(const CustomAllocator<U>&) noexcept {}
+
+    T* allocate(std::size_t n){
+        if(n > std::numeric_limits<std::size_t>::max() / sizeof(T)){
+            throw std::bad_alloc();
+        }
+
+        std::size_t bytes = n * sizeof(T);
+        T* p = static_cast<T*>(::operator new(bytes));
+        total_allocated += bytes;
+        return p;
+    }
+
+    void deallocate(T* p, std::size_t n) noexcept {
+        total_deallocated += n * sizeof(T);
+        ::operator delete(p);
+    }
+
+    template <class U>
+    bool operator==(const CustomAllocator<U>&) const noexcept {
+        return true;
+    }
+
+};
+
 
 class Matrix {
     private:
         size_t m_nrow;
         size_t m_ncol;
-        double* m_buffer; // 1D array, len =nrow * ncol
+        std::vector<double, CustomAllocator<double>> m_buffer; // 1D array, len =nrow * ncol
 
     public:
         // Constructor
-        Matrix(size_t nrow, size_t ncol){
-            m_nrow = nrow;
-            m_ncol = ncol;
-            m_buffer = new double[nrow * ncol];
-            // init all to 0
-            std::fill(m_buffer, m_buffer + nrow * ncol, 0.0);
-        } 
+        Matrix(size_t nrow, size_t ncol) : m_nrow(nrow), m_ncol(ncol), m_buffer(nrow * ncol, 0.0) {}
         
         // Destructor
-        ~Matrix() {
-            delete[] m_buffer;
-        }
+
 
         // 存取
         size_t nrow() const { return m_nrow; }
         size_t ncol() const { return m_ncol; }
-        double& operator()(size_t i, size_t j) { return m_buffer[i * m_ncol + j]; }
-        double operator()(size_t i, size_t j) const { return m_buffer[i * m_ncol + j]; }
-        double* get_buffer() const { return m_buffer; }
+        double& operator()(size_t i, size_t j) { 
+            return m_buffer[i * m_ncol + j]; 
+        }
+        double operator()(size_t i, size_t j) const { 
+            return m_buffer[i * m_ncol + j];
+        }
+        double* get_buffer() const { 
+            return const_cast<double*>(m_buffer.data()); 
+        }
         // compare
         /*        // === 比較 ===
         operator==(other) -> bool:
@@ -40,50 +87,17 @@ class Matrix {
             全部相同 回傳 true*/
         bool operator==(const Matrix& other) const {
             if(m_nrow != other.m_nrow || m_ncol != other.m_ncol) return false;
-            for(size_t i = 0; i< m_nrow* m_ncol; i++){
-                if(m_buffer[i] != other.m_buffer[i]) return false;
-            }
-            return true;
+            return m_buffer == other.m_buffer;
         }
 
         // copy constructor
-        Matrix(const Matrix& other) : m_nrow(other.m_nrow), m_ncol(other.m_ncol){
-            m_buffer = new double[m_nrow * m_ncol];
-            std::copy(other.m_buffer, other.m_buffer + m_nrow * m_ncol, m_buffer);
-        }
 
         // copy assignment
-        Matrix& operator=(const Matrix& other){
-            if(this == &other) return *this;
-            if(m_nrow != other.m_nrow || m_ncol != other.m_ncol){
-                delete[] m_buffer;
-                m_nrow = other.m_nrow;
-                m_ncol = other.m_ncol;
-                m_buffer = new double[m_nrow * m_ncol];
-            }
-            std::copy(other.m_buffer, other.m_buffer + m_nrow * m_ncol, m_buffer);
-            return *this;
-        }
 
         // move constructor
-        Matrix(Matrix&& other) noexcept : m_nrow(other.m_nrow), m_ncol(other.m_ncol), m_buffer(other.m_buffer){
-            other.m_nrow = 0;
-            other.m_ncol = 0;
-            other.m_buffer = nullptr;
-        }
 
         // move assignment
-        Matrix& operator=(Matrix&& other) noexcept{
-            if(this == &other) return *this;
-            delete[] m_buffer;
-            m_nrow = other.m_nrow;
-            m_ncol = other.m_ncol;
-            m_buffer = other.m_buffer;
-            other.m_nrow = 0;
-            other.m_ncol = 0;
-            other.m_buffer = nullptr;
-            return *this;
-        }
+
 };
 
 // 1. Naive multiplication
@@ -121,12 +135,12 @@ Matrix multiply_mkl(Matrix const &mat1, Matrix const &mat2){
 
 
 // Tiled matrix multiplication
-/*把你的 multiply_tile 從假的 naive 改成真正的六層迴圈。記得：
-
+/*
 加 size_t tsize 參數
 6 層迴圈（外 3 層切塊 + 內 3 層算小塊）
 min() 處理邊界
-C[i][k] 要累加（因為多個 j-block 會貢獻同一個位置 */
+C[i][k] 要累加（因為多個 j-block 會貢獻同一個位置
+*/
 Matrix multiply_tile(Matrix const &mat1, Matrix const &mat2, size_t tsize){
     if(mat1.ncol() != mat2.nrow()){
         throw std::runtime_error("Incompatible matrix dimensions");
@@ -154,7 +168,12 @@ Matrix multiply_tile(Matrix const &mat1, Matrix const &mat2, size_t tsize){
 }
 
 PYBIND11_MODULE(_matrix, m){
-    m.doc() = "Matrix class for homework 3";
+    m.doc() = "Matrix class for homework 4";
+
+    m.def("bytes", &bytes, "Returns the current number of bytes in use");
+    m.def("allocated", &allocated, "Returns the total number of bytes allocated");
+    m.def("deallocated", &deallocated, "Returns the total number of bytes deallocated");
+    
     py::class_<Matrix>(m, "Matrix")
         .def(py::init<size_t, size_t>())
         .def_property_readonly("nrow", &Matrix::nrow)
