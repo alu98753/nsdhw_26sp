@@ -76,9 +76,15 @@ class Matrix {
         double operator()(size_t i, size_t j) const { 
             return m_buffer[i * m_ncol + j];
         }
-        double* get_buffer() const { 
-            return const_cast<double*>(m_buffer.data()); 
+
+        const double* get_buffer() const { 
+            return m_buffer.data(); 
         }
+
+        double* get_buffer(){
+            return m_buffer.data();
+        }
+
         // compare
         /*        // === 比較 ===
         operator==(other) -> bool:
